@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.env
+.env.*
+
+# Google API credentials and tokens
+token.json
+client_secret.json
+*.pem
+*.db
+
+# IDE/editor configs
+.vscode/
+.idea/
+
+# macOS system files
+.DS_Store
+
+# Logs
+*.log
+
+# Python cache
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
