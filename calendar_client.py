@@ -16,7 +16,15 @@ TZ = zoneinfo.ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 def _get_creds() -> Credentials:
     creds = None
     token_path = 'token.json'
-    creds_path = os.getenv("GOOGLE_CREDENTIALS_JSON", "client_secret.json")
+
+    # 👇 Recreate the credentials file from base64 env var
+    if os.getenv("GOOGLE_CREDENTIALS_JSON") and not os.path.exists("client_secret.json"):
+        import base64
+        with open("client_secret.json", "wb") as f:
+            f.write(base64.b64decode(os.environ["GOOGLE_CREDENTIALS_JSON"]))
+
+    creds_path = "client_secret.json"
+
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     if not creds or not creds.valid:
