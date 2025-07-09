@@ -14,30 +14,36 @@ SCOPES = ['https://www.googleapis.com/auth/calendar']
 TZ = zoneinfo.ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 
 def _get_creds() -> Credentials:
+    import base64
     creds = None
     token_path = 'token.json'
+    creds_path = 'client_secret.json'
 
-    # ✅ Recreate the credentials file from base64 env var (works on Railway)
-    if os.getenv("GOOGLE_CREDENTIALS_JSON") and not os.path.exists("client_secret.json"):
-        import base64
-        with open("client_secret.json", "wb") as f:
+    # ✅ Recreate client_secret.json from base64 env var
+    if os.getenv("GOOGLE_CREDENTIALS_JSON") and not os.path.exists(creds_path):
+        with open(creds_path, "wb") as f:
             f.write(base64.b64decode(os.environ["GOOGLE_CREDENTIALS_JSON"]))
 
-    creds_path = "client_secret.json"
+    # ✅ Recreate token.json from base64 env var (Railway-safe)
+    if os.getenv("GOOGLE_TOKEN_JSON") and not os.path.exists(token_path):
+        with open(token_path, "wb") as f:
+            f.write(base64.b64decode(os.environ["GOOGLE_TOKEN_JSON"]))
 
+    # Load credentials from token file
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
 
+    # Refresh or authenticate if needed
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
+            # This will not work on Railway; fallback in dev only
             flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-
-            # 🔁 Use run_console() instead of run_local_server() for headless environments
             creds = flow.run_console()
 
-        with open(token_path, 'w') as token:
+        # Save refreshed token (optional if Railway is stateless)
+        with open(token_path, "w") as token:
             token.write(creds.to_json())
 
     return creds
