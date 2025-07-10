@@ -13,6 +13,10 @@ TZ = zoneinfo.ZoneInfo(os.getenv("TIMEZONE", "Europe/London"))
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+conversation_history = []
+
+
+
 SYSTEM = """
 You are a highly capable personal AI calendar assistant, working for a busy entrepreneur.
 
@@ -115,7 +119,7 @@ TOOL_DEFS = [
 
 def parse(text: str) -> Optional[Dict[str, Any]]:
     try:
-        # ⏱ Get current time dynamically on every request
+        # 🕒 Always fetch fresh timestamp
         now = datetime.now(TZ)
         system_prompt = SYSTEM.format(
             today=now.strftime('%A, %d %B %Y'),
@@ -123,41 +127,48 @@ def parse(text: str) -> Optional[Dict[str, Any]]:
             timezone=TZ
         )
 
+        # 💬 Save this user message
+        conversation_history.append({"role": "user", "content": text})
+        if len(conversation_history) > 6:
+            conversation_history.pop(0)
+
+        # 🧠 Build full message list with memory
+        messages = [{"role": "system", "content": system_prompt}] + conversation_history
+
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"{text}\nToday is {now.strftime('%A %d %B %Y')}, and current time is {now.strftime('%H:%M')} in {TZ} timezone."
-                }
-            ],
+            messages=messages,
             tools=[{"type": "function", "function": tool} for tool in TOOL_DEFS],
             tool_choice="auto",
-            temperature=0.2,
+            temperature=0.3,
         )
 
         message = response.choices[0].message
 
-        # ✅ If it calls a function (like create_event, cancel_event)
         if message.tool_calls:
             function_call = message.tool_calls[0].function
             args = json.loads(function_call.arguments)
             args["action"] = function_call.name
             args["reply"] = message.content or f"✅ {function_call.name.replace('_', ' ').title()} complete."
-            return args
-
-        # ✅ If it didn't call a function, fallback to human-style reply
-        elif message.content:
-            return {
+        else:
+            args = {
                 "action": "chat_fallback",
                 "reply": message.content
             }
 
+        # 💬 Save assistant reply
+        conversation_history.append({"role": "assistant", "content": args["reply"]})
+        if len(conversation_history) > 6:
+            conversation_history.pop(0)
+
+        return args
+
     except Exception as e:
         print("OpenAI error:", e)
-
-    return None
+        return {
+            "action": "error",
+            "reply": "⚠️ Sorry, something went wrong while processing your request."
+        }
 
 def fallback_reply(text: str) -> Optional[str]:
     try:
