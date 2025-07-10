@@ -15,7 +15,10 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 conversation_history = []
 
-
+def reset_conversation():
+    """Clears the in-memory conversation history (useful between tasks)."""
+    global conversation_history
+    conversation_history.clear()
 
 SYSTEM = """
 You are a highly capable personal AI calendar assistant, working for a busy entrepreneur.
@@ -118,6 +121,13 @@ TOOL_DEFS = [
 ]
 
 def parse(text: str) -> Optional[Dict[str, Any]]:
+        # 🧹 Listen for memory reset commands
+    if text.strip().lower() in ["reset", "clear memory", "start over", "forget what i said"]:
+        reset_conversation()
+        return {
+            "action": "reset",
+            "reply": "🧠 Conversation memory cleared. Let’s start fresh — what would you like to do?"
+        }
     try:
         # 🕒 Always fetch fresh timestamp
         now = datetime.now(TZ)
