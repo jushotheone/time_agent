@@ -10,14 +10,13 @@ load_dotenv()
 
 # Timezone-aware datetime
 TZ = zoneinfo.ZoneInfo(os.getenv("TIMEZONE", "Europe/London"))
-now = datetime.now(TZ)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-SYSTEM = f"""
+SYSTEM = """
 You are a highly capable personal AI calendar assistant, working for a busy entrepreneur.
 
-🕒 Today is {now.strftime('%A, %d %B %Y')}, and the current time is {now.strftime('%H:%M')} ({TZ} timezone).
+🕒 Today is {today}, and the current time is {current_time} ({timezone} timezone).
 Always use this as your reference when interpreting phrases like "tomorrow", "next Friday", or "after lunch".
 
 🎯 Your job is to convert natural, casual human speech into structured scheduling instructions, using a function call.
@@ -116,13 +115,21 @@ TOOL_DEFS = [
 
 def parse(text: str) -> Optional[Dict[str, Any]]:
     try:
+        # ⏱ Get current time dynamically on every request
+        now = datetime.now(TZ)
+        system_prompt = SYSTEM.format(
+            today=now.strftime('%A, %d %B %Y'),
+            current_time=now.strftime('%H:%M'),
+            timezone=TZ
+        )
+
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": SYSTEM},
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
-                    "content": f"{text}\nToday is {now.strftime('%A %d %B %Y')}, and current time is {now.strftime('%H:%M')} in Europe/London timezone."
+                    "content": f"{text}\nToday is {now.strftime('%A %d %B %Y')}, and current time is {now.strftime('%H:%M')} in {TZ} timezone."
                 }
             ],
             tools=[{"type": "function", "function": tool} for tool in TOOL_DEFS],
