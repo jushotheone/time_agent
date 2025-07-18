@@ -1,7 +1,9 @@
 import os, logging, datetime as dt, zoneinfo
 from dotenv import load_dotenv
+import db
+import asyncio
 
-load_dotenv()
+
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -11,9 +13,14 @@ import calendar_client as cal
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram.ext import Application
 
+load_dotenv()
+db.init_db()
+
 logging.basicConfig(level=logging.INFO)
 
 TZ = zoneinfo.ZoneInfo(os.getenv("TIMEZONE", "UTC"))
+
+notified_event_ids = set()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # print(f"Chat ID: {update.effective_chat.id}")
@@ -108,6 +115,8 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
     
 def send_daily_agenda(app: Application):
+    loop = asyncio.get_event_loop()  # ✅ Get the loop once here
+
     async def job():
         from datetime import datetime
         now = datetime.now(TZ)
@@ -125,7 +134,34 @@ def send_daily_agenda(app: Application):
         await app.bot.send_message(chat_id=os.getenv("TELEGRAM_CHAT_ID"), text=text)
 
     scheduler = BackgroundScheduler()
-    scheduler.add_job(lambda: app.create_task(job()), 'cron', hour=9, minute=0, timezone=TZ)
+    scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(job(), loop), 'cron', hour=4, minute=00, timezone=TZ)
+    scheduler.start()
+
+def send_time_reminders(app: Application):
+    loop = asyncio.get_event_loop()  # ✅ Same fix here
+
+    async def job():
+        from datetime import datetime
+        now = datetime.now(TZ)
+        upcoming_events = cal.get_agenda("today")
+
+        for ev in upcoming_events:
+            start_str = ev['start'].get('dateTime')
+            if not start_str:
+                continue
+
+            start_time = dt.datetime.fromisoformat(start_str).astimezone(TZ)
+            delta = (start_time - now).total_seconds()
+            
+            print(f"⏳ Checking event: {ev['summary']} | starts in {delta//60:.1f} mins")
+
+            if 9*60 <= delta <= 11*60 and not db.was_event_notified(ev['id']):
+                text = f"⏰ Reminder: *{ev['summary']}* starts at {start_time.strftime('%H:%M')}"
+                await app.bot.send_message(chat_id=os.getenv("TELEGRAM_CHAT_ID"), text=text, parse_mode="Markdown")
+                db.mark_event_as_notified(ev['id'])
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: asyncio.run_coroutine_threadsafe(job(), loop), 'interval', minutes=1)
     scheduler.start()
 
 def main():
@@ -140,6 +176,9 @@ def main():
     
     # ✅ Register the daily agenda scheduler
     send_daily_agenda(app)
+    
+    # ✅ Time-based reminders for upcoming events
+    send_time_reminders(app)
 
     # ✅ Start polling after scheduler is set
     app.run_polling()
