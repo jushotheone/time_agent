@@ -249,7 +249,11 @@ def main():
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
     
-    app = ApplicationBuilder().token(token).build()
+    async def init_job_queue(app):
+    # This is just a no-op that satisfies the async requirement
+        pass
+
+    app = ApplicationBuilder().token(token).post_init(init_job_queue).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
