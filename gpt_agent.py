@@ -5,6 +5,8 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import zoneinfo
 from datetime import datetime
+from jinja2 import Template
+
 
 load_dotenv()
 
@@ -194,3 +196,42 @@ def fallback_reply(text: str) -> Optional[str]:
     except Exception as e:
         print("OpenAI fallback error:", e)
         return "Hmm, I wasn’t sure how to help with that, but I’m here if you need help with your day."
+
+def create_reminder_message(event_title: str, phase: str = "before") -> str:
+    """
+    Use GPT to generate motivational reminder message for a given event.
+    
+    phase = "before", "during", or "after"
+    """
+
+    prompt = f"""
+You're a motivational, time-aware assistant for a high-performing entrepreneur.
+
+Your job is to generate a short message (1–2 lines) to send as a {phase} reminder for this event:
+“{event_title}”
+
+⏰ It's currently the {phase} phase — either:
+- 10 mins before the event ("before")
+- In the first few mins of the event ("during")
+- Just after the scheduled end time ("after")
+
+Respond with only the message to send. Be natural, helpful, and mission-aligned.
+Make the tone supportive, not robotic.
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print("GPT Reminder error:", e)
+        # Fallback generic
+        if phase == "before":
+            return f"⏰ Reminder: {event_title} is starting soon."
+        elif phase == "during":
+            return f"🚀 Just checking in — are you focused on {event_title}?"
+        else:
+            return f"✅ Finished with {event_title}? Great job!"

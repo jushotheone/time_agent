@@ -1,10 +1,10 @@
 # db.py
 import os
 import psycopg2
+import datetime as dt
 from dotenv import load_dotenv
 
 load_dotenv()
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_conn():
@@ -21,14 +21,92 @@ def init_db():
             """)
         conn.commit()
 
-def was_event_notified(event_id):
+def was_event_notified(event_id: str, phase: str):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM event_notifications WHERE event_id = %s", (event_id,))
+            cur.execute(
+                "SELECT 1 FROM event_notifications WHERE event_id = %s AND phase = %s",
+                (event_id, phase)
+            )
             return cur.fetchone() is not None
 
-def mark_event_as_notified(event_id):
+def mark_event_as_notified(event_id: str, phase: str):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO event_notifications (event_id) VALUES (%s) ON CONFLICT DO NOTHING", (event_id,))
+            cur.execute(
+                "INSERT INTO event_notifications (event_id, phase) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (event_id, phase)
+            )
         conn.commit()
+
+def save_postponed_reminder(event_id: str, remind_at: dt.datetime):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO postponed_reminders (event_id, remind_at)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+            """, (event_id, remind_at))
+        conn.commit()
+
+def get_due_postponed_reminders(now: dt.datetime) -> list[tuple[str, dt.datetime]]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT event_id, remind_at FROM postponed_reminders
+                WHERE remind_at <= %s
+            """, (now,))
+            return cur.fetchall()
+
+def delete_postponed_reminder(event_id: str, remind_at: dt.datetime):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM postponed_reminders
+                WHERE event_id = %s AND remind_at = %s
+            """, (event_id, remind_at))
+        conn.commit()
+
+def is_event_blocked(user_id: str, event_title: str, phase: str) -> bool:
+    keywords = [word.strip().lower() for word in event_title.lower().split()]
+    if not keywords:
+        return False
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            q_marks = ",".join(["%s"] * len(keywords))
+            query = f"""
+                SELECT 1 FROM event_preferences
+                WHERE user_id = %s
+                AND keyword IN ({q_marks})
+                AND block_phase IN (%s, %s)
+                LIMIT 1
+            """
+            params = [user_id] + keywords + [phase, "all"]
+            cur.execute(query, params)
+            return cur.fetchone() is not None
+        
+def get_events_for_review(now):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM events
+                WHERE end_time BETWEEN %s - INTERVAL '2 hours' AND %s
+                AND ai_reviewed IS NOT TRUE
+            """, (now, now))
+            return [dict(zip([desc[0] for desc in cur.description], row)) for row in cur.fetchall()]
+
+def mark_ai_reviewed(event_id):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE events SET ai_reviewed = TRUE WHERE event_id = %s", (event_id,))
+            conn.commit()
+
+def get_user_context(user_id, now):
+    return {
+        "today": now.date().isoformat(),
+        "user_values": "Faith, Family, Focus",
+        "spiritual_goals": "Pray daily, Sabbath on Saturday, journal at night",
+        "weekly_theme": "Ruoth listings",
+        "known_struggles": "Neglects rest; works late"
+    }
