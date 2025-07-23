@@ -5,6 +5,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import zoneinfo
 from datetime import datetime
+from agent_brain.principles import COVEY_SYSTEM_PROMPT
 
 load_dotenv()
 
@@ -27,6 +28,10 @@ You are a highly capable personal AI calendar assistant, working for a busy entr
 Always use this as your reference when interpreting phrases like "tomorrow", "next Friday", or "after lunch".
 
 🎯 Your job is to convert natural, casual human speech into structured scheduling instructions, using a function call.
+
+If the user says they are tired, need rest, or want to push the current event forward, suggest a reschedule.
+If the user asks “how long is my meeting” or “who is attending”, use the duration or attendee tools.
+Use describe_event to give full metadata when the user wants full context of a meeting.
 
 You can perform these actions:
 - create_event: Add a new calendar event
@@ -117,6 +122,88 @@ TOOL_DEFS = [
             },
             "required": ["range"]
         }
+    },
+    {
+        "name": "extend_event",
+        "description": "Extend the duration of an existing event",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "additional_minutes": {"type": "integer"}
+            },
+            "required": ["title", "additional_minutes"]
+        }
+    },
+    {
+        "name": "rename_event",
+        "description": "Change the title of an existing event on a specific date",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "original_title": {"type": "string"},
+                "new_title": {"type": "string"},
+                "date": {"type": "string", "description": "Date of the event in YYYY-MM-DD"}
+            },
+            "required": ["original_title", "new_title", "date"]
+        }
+    },
+    {
+        "name": "get_event_duration",
+        "description": "Check how long a scheduled event is",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "date": {"type": "string"}
+            },
+            "required": ["title", "date"]
+        }
+    },
+    {
+        "name": "get_time_until_next_event",
+        "description": "Find out how much time is left before the next scheduled event starts",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "describe_event",
+        "description": "Get full metadata for a calendar event including time, location, attendees, recurrence",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "date": {"type": "string"}
+            },
+            "required": ["title", "date"]
+        }
+    },
+    {
+        "name": "list_attendees",
+        "description": "List the people invited to a given meeting",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "date": {"type": "string"}
+            },
+            "required": ["title", "date"]
+        }
+    },
+    {
+        "name": "log_event_action",
+        "description": "Track when events are created, updated, or deleted for audit history",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "action": {"type": "string"},  # create, update, delete
+                "timestamp": {"type": "string"}
+            },
+            "required": ["event_id", "action", "timestamp"]
+        }
     }
 ]
 
@@ -198,23 +285,23 @@ def fallback_reply(text: str) -> Optional[str]:
 def create_reminder_message(event_title: str, phase: str = "before") -> str:
     """
     Use GPT to generate motivational reminder message for a given event.
-    
-    phase = "before", "during", or "after"
     """
+    phase_text = {
+        "before": "10 mins before the event",
+        "during": "in the first few minutes of the event",
+        "after": "just after the scheduled end time"
+    }.get(phase, "at the appropriate time")
 
-    prompt = f"""
-You're a motivational, time-aware assistant for a high-performing entrepreneur.
+    prompt = f"""{COVEY_SYSTEM_PROMPT}
 
-Your job is to generate a short message (1–2 lines) to send as a {phase} reminder for this event:
+You're a motivational, time-aware assistant helping a busy entrepreneur steward their time.
+
+⏰ It's currently the *{phase}* phase — {phase_text}.
+
+Generate a short message (1–2 lines) to send as a reminder for this event:
 “{event_title}”
 
-⏰ It's currently the {phase} phase — either:
-- 10 mins before the event ("before")
-- In the first few mins of the event ("during")
-- Just after the scheduled end time ("after")
-
-Respond with only the message to send. Be natural, helpful, and mission-aligned.
-Make the tone supportive, not robotic.
+Respond with only the message to send. Be natural, supportive, and purpose-aligned.
 """
 
     try:
@@ -226,7 +313,6 @@ Make the tone supportive, not robotic.
         return response.choices[0].message.content.strip()
     except Exception as e:
         print("GPT Reminder error:", e)
-        # Fallback generic
         if phase == "before":
             return f"⏰ Reminder: {event_title} is starting soon."
         elif phase == "during":
@@ -235,15 +321,17 @@ Make the tone supportive, not robotic.
             return f"✅ Finished with {event_title}? Great job!"
         
 def generate_nudge(event, context):
+    from jinja2 import Template
     with open("prompts/daily_review.txt") as f:
         template = Template(f.read())
 
-    prompt = template.render(event=event, context=context)
+    body = template.render(event=event, context=context)
+    full_prompt = COVEY_SYSTEM_PROMPT + "\n" + body
 
     res = client.chat.completions.create(
-    model="gpt-4",
-    messages=[{"role": "system", "content": prompt}]
-)
+        model="gpt-4",
+        messages=[{"role": "system", "content": full_prompt}]
+    )
 
     reply = res.choices[0].message["content"]
     return reply.strip() if "❌" not in reply else None
