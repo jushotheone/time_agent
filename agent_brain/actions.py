@@ -99,13 +99,21 @@ async def handle_action(parsed, update, context):
     action = parsed.get("action")
 
     if action == "create_event":
-        create_event(parsed)
-        summary = f"✅ Event '{parsed['title']}' created for {parsed['date']} at {parsed['time']}"
+        start = dt.datetime.fromisoformat(f"{parsed['date']}T{parsed['time']}").replace(tzinfo=TZ)
+        event = cal.create_event(
+            parsed['title'],
+            start,
+            parsed.get('duration_minutes', 60),
+            parsed.get('attendees'),
+            parsed.get('recurrence')
+        )
+        summary = format_event_description(event)
         await respond_with_brain(update, context, parsed, summary=summary)
 
     elif action == "reschedule_event":
-        reschedule_event(parsed)
-        summary = f"🔄 Event '{parsed['original_title']}' rescheduled to {parsed['new_date']} at {parsed['new_time']}"
+        new_start = dt.datetime.fromisoformat(f"{parsed['new_date']}T{parsed['new_time']}").replace(tzinfo=TZ)
+        updated = cal.reschedule_event(parsed['original_title'], new_start)
+        summary = format_event_description(updated)
         await respond_with_brain(update, context, parsed, summary=summary)
 
     elif action == "cancel_event":
@@ -114,13 +122,15 @@ async def handle_action(parsed, update, context):
         await respond_with_brain(update, context, parsed, summary=summary)
 
     elif action == "extend_event":
-        extend_event(parsed)
-        summary = f"⏩ Event '{parsed['title']}' extended by {parsed['additional_minutes']} minutes."
+        # Perform extend, then refetch the updated event for metadata-rich summary
+        cal.extend_event(parsed['title'], parsed['additional_minutes'])
+        updated = cal.describe_event(parsed['title'], parsed['date'])
+        summary = format_event_description(updated)
         await respond_with_brain(update, context, parsed, summary=summary)
 
     elif action == "rename_event":
-        rename(parsed)
-        summary = f"✏️ Event '{parsed['original_title']}' renamed to '{parsed['new_title']}' on {parsed['date']}"
+        updated = rename_event(parsed['original_title'], parsed['new_title'], parsed['date'])
+        summary = format_event_description(updated)
         await respond_with_brain(update, context, parsed, summary=summary)
 
     elif action == "describe_event":
