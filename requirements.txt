@@ -8,6 +8,7 @@ attrs==25.3.0
 cachetools==5.5.2
 certifi==2025.7.9
 charset-normalizer==3.4.2
+dateparser==1.2.2
 distro==1.9.0
 frozenlist==1.7.0
 google-api-core==2.25.1
@@ -40,6 +41,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 python-telegram-bot==20.7
 pytz==2025.2
+regex==2024.11.6
 requests==2.32.4
 requests-oauthlib==2.0.0
 rsa==4.9.1
