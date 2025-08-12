@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import zoneinfo
 from datetime import datetime
 from agent_brain.principles import COVEY_SYSTEM_PROMPT
+from feature_flags import ff
 
 load_dotenv()
 
@@ -335,3 +336,35 @@ def generate_nudge(event, context):
 
     reply = res.choices[0].message["content"]
     return reply.strip() if "❌" not in reply else None
+
+# --- add near the bottom of gpt_agent.py ---
+def llm_tone_polish(text: str, tone: str, context: dict | None = None) -> str:
+    """
+    Optional: Rewrite a short message in the requested tone ('gentle'|'coach'|'ds').
+    Guarded by WF0_LLM_TONE. Returns input text unchanged if flag is off or error occurs.
+    """
+    if not ff.enabled("WF0_LLM_TONE"):
+        return text
+
+    try:
+        system = (
+            "You are a time-discipline assistant. Rewrite the user's short message "
+            "to match the requested tone:\n"
+            "- gentle: warm, supportive, brief\n"
+            "- coach: firm, encouraging, goal-aligned\n"
+            "- ds: direct, no-nonsense, concise\n"
+            "Keep buttons/emoji if present; do not add new actions."
+        )
+        msgs = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"TONE={tone}\nCONTEXT={context or {}}\nTEXT:\n{text}"}
+        ]
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=msgs,
+            temperature=0.3
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print("LLM tone polish error:", e)
+        return text

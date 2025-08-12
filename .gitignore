@@ -7,6 +7,7 @@ __pycache__/
 venv/
 .env
 .env.*
+venv333/
 
 # Google API credentials and tokens
 token.json
@@ -30,3 +31,6 @@ client_secret.json
 dist/
 build/
 *.egg
+tests/personal_calendar_assistant_agent.code-workspace
+tree.txt
+.undo_event.json

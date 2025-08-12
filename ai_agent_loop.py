@@ -1,72 +1,79 @@
 # ai_agent_loop.py
-import datetime as dt
+import os, asyncio, inspect, datetime as dt
+from telegram import Bot
+
 from db import get_events_for_review, mark_ai_reviewed, get_user_context
 from gpt_agent import generate_nudge
-from telegram import Bot
-import os
-import asyncio
 
 from agent_brain.core import run_brain
 from agent_brain.weekly_audit import run_weekly_audit
-from agent_brain.quadrant_detector import detect_quadrant
 from agent_brain.evening_review import run_evening_review
 
-bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+# helper: call bot.send_message whether it's async (PTB v20+) or sync
+async def _send(bot, **kwargs):
+    fn = bot.send_message
+    if inspect.iscoroutinefunction(fn):
+        return await fn(**kwargs)
+    # sync fallback (older libs or your own wrapper)
+    return await asyncio.to_thread(fn, **kwargs)
 
-def run_ai_loop():
+async def run_ai_loop():
     now = dt.datetime.utcnow()
+    bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
 
-    # 🧠 Executive loop: detect drift, reschedule, nudge
-    asyncio.run(run_brain())
+    # 🧠 Main brain pass (was asyncio.run(run_brain()))
+    await run_brain()
 
     # After run_brain() and before review nudges
-    followup_missed_q2(now)
-    
-    # 🌙 Evening review
-    run_evening_review()
+    await followup_missed_q2(now, bot)
 
-    
-    # 📅 Sunday: Run weekly quadrant audit
+    # 🌙 Evening review (sync in your code; run it off-thread to avoid blocking)
+    await asyncio.to_thread(run_evening_review)
+
+    # 📅 Sunday weekly audit
     if now.weekday() == 6:  # Sunday
-        audit_summary = run_weekly_audit()
+        audit_summary = await asyncio.to_thread(run_weekly_audit)
         if audit_summary:
-            bot.send_message(
+            await _send(
+                bot,
                 chat_id=os.getenv("TELEGRAM_CHAT_ID"),
                 text=audit_summary,
-                parse_mode="Markdown"
+                parse_mode="Markdown",
             )
 
     # 🤖 Review recently completed events
-    events = get_events_for_review(now)
+    events = await asyncio.to_thread(get_events_for_review, now)
     for event in events:
         user_id = event["user_id"]
-        context = get_user_context(user_id, now)
-        nudge = generate_nudge(event, context)
-
+        context = await asyncio.to_thread(get_user_context, user_id, now)
+        nudge = await asyncio.to_thread(generate_nudge, event, context)
         if nudge:
-            bot.send_message(chat_id=user_id, text=nudge, parse_mode="Markdown")
-            mark_ai_reviewed(event["event_id"])
-            
-def followup_missed_q2(now):
-    from db import get_conn
-    bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+            await _send(bot, chat_id=user_id, text=nudge, parse_mode="Markdown")
+            await asyncio.to_thread(mark_ai_reviewed, event["event_id"])
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
+async def followup_missed_q2(now, bot):
+    from db import get_conn
+    import datetime as dt
+
+    def _fetch():
+        with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""
                 SELECT event_id, status FROM event_log
                 WHERE quadrant = 'II'
-                AND status = 'missed'
-                AND followed_up IS NOT TRUE
-                AND timestamp >= %s
+                  AND status = 'missed'
+                  AND followed_up IS NOT TRUE
+                  AND timestamp >= %s
             """, (now - dt.timedelta(days=3),))
+            rows = cur.fetchall()
+            for event_id, status in rows:
+                cur.execute(
+                    "UPDATE event_log SET followed_up = TRUE WHERE event_id = %s AND status = %s",
+                    (event_id, status),
+                )
+            conn.commit()
+            return rows
 
-            missed_q2_events = cur.fetchall()
-
-            for event_id, status in missed_q2_events:
-                # Prevent double-followup
-                cur.execute("UPDATE event_log SET followed_up = TRUE WHERE event_id = %s AND status = %s", (event_id, status))
-                conn.commit()
-
-                msg = f"🙏 You missed a Q2 block recently. Want to reschedule or reflect on it?\nEvent: *{event_id}*"
-                bot.send_message(chat_id=os.getenv("TELEGRAM_CHAT_ID"), text=msg, parse_mode="Markdown")
+    missed_q2_events = await asyncio.to_thread(_fetch)
+    for event_id, _ in missed_q2_events:
+        msg = f"🙏 You missed a Q2 block recently. Want to reschedule or reflect on it?\nEvent: *{event_id}*"
+        await _send(bot, chat_id=os.getenv("TELEGRAM_CHAT_ID"), text=msg, parse_mode="Markdown")

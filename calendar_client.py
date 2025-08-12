@@ -54,30 +54,161 @@ def _service():
     creds = _get_creds()
     return build('calendar', 'v3', credentials=creds)
 
-def create_event(title: str, start: dt.datetime, duration_minutes: int = 60, attendees: Optional[List[str]] = None, recurrence: Optional[str] = None) -> Dict:
+# ---- WF0 rigidity + safe move helpers ---------------------------------------
+
+BUFFER_MIN = int(os.getenv("TRANSITION_BUFFER_MIN", "5"))  # 5–10 as per spec
+
+def _get_rigidity_from_event(ev: Dict) -> str:
+    # Prefer extendedProperties.private.rigidity, fallback to a #rigidity: tag in description
+    rig = (
+        ev.get("extendedProperties", {})
+          .get("private", {})
+          .get("rigidity")
+    )
+    if rig:
+        return rig
+    desc = (ev.get("description") or "").lower()
+    for tag in ("#rigidity:hard", "#rigidity:firm", "#rigidity:soft", "#rigidity:free"):
+        if tag in desc:
+            return tag.split(":")[1]
+    return "soft"  # default
+
+def _set_rigidity_on_event(ev: Dict, rigidity: str) -> None:
+    ev.setdefault("extendedProperties", {}).setdefault("private", {})["rigidity"] = rigidity
+
+def _has_conflict(service, start: dt.datetime, end: dt.datetime, ignore_event_id: Optional[str] = None) -> bool:
+    items = service.events().list(
+        calendarId='primary',
+        timeMin=start.isoformat(),
+        timeMax=end.isoformat(),
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute().get('items', [])
+    if ignore_event_id:
+        items = [it for it in items if it.get("id") != ignore_event_id]
+    return len(items) > 0
+
+def _with_transition_buffer(prev_end: Optional[dt.datetime], new_start: dt.datetime) -> dt.datetime:
+    # If there’s no previous end or buffer already exists, keep as-is
+    if not prev_end:
+        return new_start
+    gap_min = int((new_start - prev_end).total_seconds() / 60)
+    if gap_min < BUFFER_MIN:
+        return prev_end + dt.timedelta(minutes=BUFFER_MIN)
+    return new_start
+
+def get_event_by_id(event_id: str) -> Optional[Dict]:
+    service = _service()
+    try:
+        return service.events().get(calendarId='primary', eventId=event_id).execute()
+    except Exception:
+        return None
+
+def move_block(event_id: str, new_start: dt.datetime, new_end: dt.datetime,
+               *, required_rigidity: Optional[str] = None,
+               require_confirm: bool = False) -> Dict:
+    """
+    Safely move a calendar block:
+      - hard  -> never move (raises)
+      - firm  -> move only if require_confirm=True (else raises)
+      - soft/free -> auto-move
+      - Adds transition buffer (5–10m) vs previous event when shrinking start
+      - Conflict checks (ignores self)
+    """
+    service = _service()
+    ev = get_event_by_id(event_id)
+    if not ev:
+        raise ValueError("Event not found")
+
+    rigidity = required_rigidity or _get_rigidity_from_event(ev)
+    rigidity = rigidity.lower()
+
+    if rigidity == "hard":
+        raise ValueError("⛔ This event is marked hard and cannot be moved.")
+    if rigidity == "firm" and not require_confirm:
+        raise ValueError("⚠️ This event is firm. Confirmation is required to move it.")
+
+    # Add transition buffer vs the previous event ending right before new_start (best effort)
+    prev_end = None
+    # Pull the event immediately before the proposed start to compute a minimal buffer
+    prev = service.events().list(
+        calendarId='primary',
+        timeMax=new_start.isoformat(),
+        maxResults=1,
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute().get('items', [])
+    if prev:
+        # If there's a previous event that ends close to the new start, capture its end
+        ps = prev[0]['end'].get('dateTime', prev[0]['end'].get('date'))
+        prev_end = isoparse(ps).astimezone(TZ)
+    new_start_buf = _with_transition_buffer(prev_end, new_start)
+
+    # Conflict check
+    if _has_conflict(service, new_start_buf, new_end, ignore_event_id=event_id):
+        raise ValueError("⛔ Conflict detected with another event in the proposed time.")
+
+    # Patch event times
+    ev['start'] = {'dateTime': new_start_buf.isoformat(), 'timeZone': str(TZ)}
+    ev['end']   = {'dateTime': new_end.isoformat(),       'timeZone': str(TZ)}
+
+    updated = service.events().update(calendarId='primary', eventId=event_id, body=ev).execute()
+    log_event_action("update", updated)
+    return updated
+
+def create_event(
+    title: str,
+    start: dt.datetime,
+    duration_minutes: int = 60,
+    attendees: Optional[List[str]] = None,
+    recurrence: Optional[str] = None,
+    *,
+    rigidity: str = "soft",          # 'hard' | 'firm' | 'soft' | 'free' (default: soft)
+    polish_title: bool = False       # future‑proof: LLM hook if you want it later
+) -> Dict:
     service = _service()
     end = start + dt.timedelta(minutes=duration_minutes)
 
-    def _is_conflicting(start: dt.datetime, end: dt.datetime) -> bool:
+    def _is_conflicting(_start: dt.datetime, _end: dt.datetime) -> bool:
         overlapping = service.events().list(
             calendarId='primary',
-            timeMin=start.isoformat(),
-            timeMax=end.isoformat(),
-            singleEvents=True
+            timeMin=_start.isoformat(),
+            timeMax=_end.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
         ).execute().get('items', [])
         return len(overlapping) > 0
 
+    # Optional title polish hook (no-op by default so it stays fast & deterministic)
+    def maybe_polish_title(t: str) -> str:
+        return t  # plug in an LLM call later if you want
+
+    if polish_title:
+        title = maybe_polish_title(title)
+
+    # Conflict handling with a suggested alternative
     if _is_conflicting(start, end):
-        raise ValueError("⛔ Conflict detected: Another event exists during this time.")
+        # search forward for the next available window today (5-min steps, cap ~2h)
+        probe = start
+        cap = start + dt.timedelta(hours=2)
+        while probe < cap:
+            probe += dt.timedelta(minutes=5)
+            probe_end = probe + dt.timedelta(minutes=duration_minutes)
+            if not _is_conflicting(probe, probe_end):
+                suggestion = f"{probe.astimezone(TZ).strftime('%H:%M')}–{probe_end.astimezone(TZ).strftime('%H:%M')}"
+                raise ValueError(f"⛔ Conflict: another event overlaps. Next open window: {suggestion}. Want me to move it there?")
+        raise ValueError("⛔ Conflict: another event overlaps this time window.")
 
     event_body = {
         'summary': title,
         'start': {'dateTime': start.isoformat(), 'timeZone': str(TZ)},
-        'end': {'dateTime': end.isoformat(), 'timeZone': str(TZ)},
+        'end':   {'dateTime': end.isoformat(),   'timeZone': str(TZ)},
         'reminders': {
             'useDefault': False,
             'overrides': [{'method': 'popup', 'minutes': 15}]
-        }
+        },
+        # Tag rigidity so later moves respect hard/firm/soft/free
+        'extendedProperties': {'private': {'rigidity': rigidity}}
     }
     if attendees:
         event_body['attendees'] = [{'email': email} for email in attendees]
@@ -102,27 +233,75 @@ def list_today() -> List[Dict]:
     ).execute().get('items', [])
 
 def reschedule_event(original_title: str, new_start: dt.datetime) -> Optional[Dict]:
+    """
+    Find the next upcoming event matching `original_title` and move it to `new_start`,
+    preserving its original duration. Respects rigidity and conflict rules via move_block().
+
+    Returns the updated event dict, or None if no matching upcoming event is found.
+
+    Raises ValueError when:
+      - the event is 'hard' (cannot be moved),
+      - the event is 'firm' and requires confirmation,
+      - the new slot conflicts with another event (after buffer),
+      - or the event lacks precise start/end times.
+    """
     service = _service()
-    now = dt.datetime.utcnow().isoformat() + 'Z'
-    events = service.events().list(
+    now_iso = dt.datetime.now(TZ).isoformat()
+
+    # Fetch a few upcoming candidates so we can pick the best title match
+    items = service.events().list(
         calendarId='primary',
         q=original_title,
-        timeMin=now,
-        maxResults=1,
+        timeMin=now_iso,
         singleEvents=True,
-        orderBy='startTime'
+        orderBy='startTime',
+        maxResults=10
     ).execute().get('items', [])
 
-    if not events:
+    if not items:
         return None
 
-    event = events[0]
-    event['start'] = {'dateTime': new_start.isoformat(), 'timeZone': str(TZ)}
-    event['end'] = {'dateTime': (new_start + dt.timedelta(minutes=60)).isoformat(), 'timeZone': str(TZ)}
+    # Prefer exact case‑insensitive match; otherwise first partial match in time order
+    match = None
+    lower_title = (original_title or "").lower()
+    for ev in items:
+        summary = (ev.get('summary') or "")
+        if summary.lower() == lower_title:
+            match = ev
+            break
+        if not match and lower_title in summary.lower():
+            match = ev
 
-    updated_event = service.events().update(calendarId='primary', eventId=event['id'], body=event).execute()
-    log_event_action("update", updated_event)
-    return updated_event
+    if not match:
+        return None
+
+    # Must have precise times
+    start_str = match['start'].get('dateTime')
+    end_str   = match['end'].get('dateTime')
+    if not start_str or not end_str:
+        raise ValueError("Selected event does not have a precise start/end time.")
+
+    old_start = isoparse(start_str).astimezone(TZ)
+    old_end   = isoparse(end_str).astimezone(TZ)
+    duration  = old_end - old_start
+    new_end   = new_start + duration
+
+    # Optional backup so undo is possible
+    try:
+        backup_event(match)
+    except Exception:
+        pass  # non-fatal
+
+    # Respect rigidity & buffers/conflicts via move_block()
+    rigidity = _get_rigidity_from_event(match)
+    updated  = move_block(
+        match['id'],
+        new_start,
+        new_end,
+        required_rigidity=rigidity,
+        require_confirm=False  # will raise if 'firm' and you want confirmation first
+    )
+    return updated
 
 def cancel_event(title: str, date: str) -> bool:
     service = _service()
@@ -286,28 +465,67 @@ def get_current_and_next_event() -> Dict[str, Optional[Dict]]:
 
     return {"current": current, "next": next_event}
 
-def extend_event(title: str, additional_minutes: int):
-    events = get_agenda("today")
-    for ev in events:
-        if title.lower() in ev["summary"].lower():
-            start_str = ev["start"].get("dateTime")
-            end_str = ev["end"].get("dateTime")
-            if not start_str or not end_str:
-                raise ValueError("Event missing time info")
+def extend_event(title: str, additional_minutes: int) -> Dict:
+    """
+    Extend the first matching *upcoming/today* event whose summary contains `title`
+    by `additional_minutes`, preserving start and respecting rigidity + buffer/conflicts.
+    Returns the updated event dict. Raises ValueError on missing/ambiguous data.
+    """
+    service = _service()
+    now_iso = dt.datetime.now(TZ).isoformat()
 
-            start = dt.datetime.fromisoformat(start_str)
-            end = dt.datetime.fromisoformat(end_str)
-            new_end = end + dt.timedelta(minutes=additional_minutes)
+    # Find a reasonable candidate today/upcoming
+    items = service.events().list(
+        calendarId='primary',
+        q=title,
+        timeMin=now_iso,
+        singleEvents=True,
+        orderBy='startTime',
+        maxResults=10
+    ).execute().get('items', [])
 
-            event_id = ev["id"]
-            service = _service()  # ✅ Corrected here
-            service.events().patch(
-                calendarId="primary",
-                eventId=event_id,
-                body={"end": {"dateTime": new_end.isoformat(), "timeZone": "UTC"}}
-            ).execute()
-            return
-    raise ValueError(f"Could not find event titled: {title}")
+    if not items:
+        raise ValueError(f"Could not find event titled: {title}")
+
+    # Prefer exact case-insensitive match, else first partial
+    match = None
+    needle = title.lower()
+    for ev in items:
+        summary = (ev.get("summary") or "")
+        if summary.lower() == needle:
+            match = ev
+            break
+        if not match and needle in summary.lower():
+            match = ev
+
+    if not match:
+        raise ValueError(f"Could not find event titled: {title}")
+
+    start_str = match["start"].get("dateTime")
+    end_str   = match["end"].get("dateTime")
+    if not start_str or not end_str:
+        raise ValueError("Event missing time info")
+
+    start = isoparse(start_str).astimezone(TZ)
+    end   = isoparse(end_str).astimezone(TZ)
+    new_end = end + dt.timedelta(minutes=additional_minutes)
+
+    # Optional backup for undo
+    try:
+        backup_event(match)
+    except Exception:
+        pass
+
+    rigidity = _get_rigidity_from_event(match)
+    # Use move_block to enforce rigidity + buffer + conflict checks
+    updated = move_block(
+        match["id"],
+        start,          # start stays the same
+        new_end,
+        required_rigidity=rigidity,
+        require_confirm=False   # will raise for 'firm' if you want explicit confirm elsewhere
+    )
+    return updated
 
 def cancel_event_natural(phrase: str) -> bool:
     service = _service()

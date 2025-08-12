@@ -1,0 +1,36 @@
+flags:
+  # WF0 — Live Session Stewardship (sub-features)
+  WF0_ADAPTIVE: true
+  WF0_FTM: true
+  WF0_DS_MODE: false
+  WF0_SNOOZE: true
+  WF0_INTERRUPTED: true
+  WF0_RESET_DAY: true
+  WF0_MINIMAL_PLAN: true
+  WF0_RIGIDITY: true
+  WF0_BUFFERS: true
+  WF0_JETLAG: true
+  WF0_SIGNALS: false
+
+  # WF1–WF17 — capability modules
+  WF1_REMINDERS: true
+  WF2_CONVERSATION: true
+  WF3_QUADRANTS: false
+  WF4_EVENING_REVIEW: true
+  WF5_ACCOUNTABILITY: false
+  WF6_SELF_CORRECT: false
+  WF7_FAITH_INTEGRATION: false
+  WF8_MICRO_COACH: false
+  WF9_MEMORY: true
+  WF10_GOALS: false
+  WF11_PEOPLE_PLACES: false
+  WF12_THEMES: false
+  WF13_WEEKLY_PLANNING: false
+  WF14_CASUAL_CAPTURE: false
+  WF15_VOICE_UI: false
+  WF16_TIME_AUDIT: false
+  WF17_CONTENT_AWARE: false
+
+user_overrides: {}
+
+rollouts: {}

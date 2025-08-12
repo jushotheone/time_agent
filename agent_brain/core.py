@@ -5,14 +5,13 @@ import os
 from telegram import Bot
 from openai import AsyncOpenAI  # ✅ Use the async client
 import calendar_client
-from db import get_user_context
+from db import get_user_context, get_recent_conversation, save_conversation_turn, clear_conversation_history
 from agent_brain.observer import detect_drift
 from agent_brain.scheduler import propose_adjustment
 from agent_brain.prompts import generate_followup_nudge
 from agent_brain.state import log_event_status
 from agent_brain.principles import COVEY_SYSTEM_PROMPT
 import datetime as dt
-from db import get_user_context, get_recent_conversation, save_conversation_turn, clear_conversation_history
 
 
 async def run_brain():
@@ -43,13 +42,28 @@ async def run_brain():
     print("📤 [run_brain] Message sent to Telegram.")
     
     
-async def conversational_brain(user_message: str) -> str:
+async def conversational_brain(input_msg) -> str:
+    """
+    Accepts either:
+      - str: user message
+      - dict: {"system": str|None, "user": str|None}
+    """
+    # --- Normalize inputs ---
+    if isinstance(input_msg, dict):
+        system_override = (input_msg.get("system") or "").strip()
+        user_message = (input_msg.get("user") or "").strip()
+    else:
+        system_override = ""
+        user_message = (input_msg or "").strip()
+
     user_id = os.getenv("TELEGRAM_CHAT_ID")
-    
-    if user_message.lower().strip() in ["reset", "start over", "clear memory"]:
+
+    # Reset guard checks the *user* text
+    if user_message.lower() in {"reset", "start over", "clear memory"}:
         clear_conversation_history(user_id)
         return "🧠 Memory cleared. Let's begin fresh — what would you like to focus on today?"
 
+    # Context for the default system prompt
     context = get_user_context(user_id=user_id, now=dt.datetime.utcnow()) or {}
     current_event = calendar_client.get_current_and_next_event().get("current")
 
@@ -57,7 +71,7 @@ async def conversational_brain(user_message: str) -> str:
     focus = context.get("focus", "No focus set")
     energy = context.get("energy", "Unknown")
 
-    system_prompt = f"""
+    base_system_prompt = f"""
 {COVEY_SYSTEM_PROMPT}
 
 You are a time-stewardship assistant, helping the user manage their calendar.
@@ -75,9 +89,17 @@ Context:
 - Energy Level: {energy}
 """.strip()
 
+    # Chat history
     history = get_recent_conversation(user_id)
 
-    messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
+    # Build the messages array
+    messages = []
+    if system_override:
+        messages.append({"role": "system", "content": system_override})
+    messages.append({"role": "system", "content": base_system_prompt})
+    messages += history
+    messages.append({"role": "user", "content": user_message})
+
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     response = await client.chat.completions.create(
         model="gpt-4o",
@@ -86,7 +108,7 @@ Context:
 
     reply = response.choices[0].message.content.strip()
 
-    # ✅ Save to conversation memory
+    # Save convo
     save_conversation_turn(user_id, "user", user_message)
     save_conversation_turn(user_id, "assistant", reply)
 

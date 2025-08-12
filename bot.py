@@ -1,11 +1,9 @@
 import os, logging, datetime as dt, zoneinfo
 from dotenv import load_dotenv
 import db
-import asyncio
+import re
 
-
-
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 import gpt_agent
@@ -16,12 +14,12 @@ from agent_brain.scheduler import (
 )
 import calendar_client as cal
 from ai_agent_loop import run_ai_loop
-from apscheduler.schedulers.background import BackgroundScheduler
-from telegram.ext import Application
 from agent_brain.weekly_audit import send_weekly_audit
 from agent_brain.evening_review import run_evening_review
-from calendar_client import rename_event
-from agent_brain.actions import handle_action
+from datetime import datetime as _dt
+from zoneinfo import ZoneInfo as _ZoneInfo
+from agent_brain import actions as AB
+from agent_brain import observer as OBS
 
 load_dotenv()
 db.init_db()
@@ -29,8 +27,6 @@ db.init_db()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 TZ = zoneinfo.ZoneInfo(os.getenv("TIMEZONE", "UTC"))
-
-notified_event_ids = set()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -41,7 +37,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await handle_action(parsed, update, context)
+        await AB.handle_action(parsed, update, context)
     except ValueError as ve:
         await update.message.reply_text(str(ve))
     except Exception as e:
@@ -61,22 +57,107 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hi! I'm your Calendar Assistant. What would you like to do today?")
+    
+_CHAT_TZ = _ZoneInfo(os.getenv("TIMEZONE", "UTC"))
+
+async def handle_wf0_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Expects callback_data like: wf0:<segment_id>:<verb>[:arg]
+    Examples:
+      wf0:seg123:send_start
+      wf0:seg123:snooze_segment:10
+      wf0:seg123:extend_15
+      wf0:seg123:pivot:Write proposal
+    """
+    q = update.callback_query
+    await q.answer()
+
+    try:
+        _, seg_id, verb, *rest = q.data.split(":", 3)
+    except ValueError:
+        await q.edit_message_text("⚠️ Sorry, I couldn’t parse that action.")
+        return
+
+    parsed = {"action": verb, "segment_id": seg_id}
+
+    # optional arg (minutes or new focus)
+    if rest:
+        arg = rest[0]
+        if verb == "snooze_segment":
+            try:
+                parsed["minutes"] = int(arg)
+            except ValueError:
+                parsed["minutes"] = 5
+        elif verb in ("extend_15", "extend_30"):
+            # keep verb as-is; actions will map to minutes
+            pass
+        elif verb == "pivot":
+            parsed["new_focus"] = arg
+
+    # Reuse your normal action router so replies go through the LLM
+    await AB.handle_action(parsed, update, context)
+
+
+async def handle_pivot_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    m = re.match(r"^i'?m doing (.+)$", text, flags=re.IGNORECASE)
+    if not m:
+        return
+
+    new_focus = m.group(1).strip()
+    # drop trailing "now" if present
+    if new_focus.lower().endswith(" now"):
+        new_focus = new_focus[:-4].strip(" .")
+
+    now = _dt.now(_CHAT_TZ)
+    seg = db.get_active_segment(now)
+    if not seg:
+        await update.message.reply_text("There isn’t an active block to pivot from right now.")
+        return
+
+    parsed = {"action": "pivot", "segment_id": seg["id"], "new_focus": new_focus or "Ad‑hoc Focus"}
+    await AB.handle_action(parsed, update, context)
+
+async def wf0_tick(context):
+    """Runs every minute. Pulls FSM ticks & gap detections and dispatches actions."""
+    results = OBS.detect_drift()  # returns list[{'segment_id','action','tone','event'}] or None
+    if not results:
+        return
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")  # or derive from your user model
+    if not chat_id:
+        return
+    # Build a fake Update/Context so we can reuse handle_action’s reply path
+    class _ShimUpdate: pass
+    shim_update = _ShimUpdate()
+    shim_update.effective_chat = type("C", (), {"id": chat_id})()
+    shim_update.callback_query = None
+    shim_update.message = None
+
+    for r in results:
+        parsed = {"action": r["action"], "segment_id": r["segment_id"]}
+        await AB.handle_action(parsed, shim_update, context)
+        
+async def ai_loop_job(context):
+    await run_ai_loop()
+    
+async def weekly_audit_job(context):
+    await send_weekly_audit()
+    
+async def evening_review_job(context):
+    await run_evening_review()
 
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
-    
-    async def init_job_queue(app):
-        # No-op async init
-        pass
 
-    app = ApplicationBuilder().token(token).post_init(init_job_queue).build()
+    app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_remind_again, pattern=r"^remind_again\|"))
-    app.job_queue.run_repeating(callback=lambda ctx: run_ai_loop(), interval=3600)
+    app.job_queue.run_repeating(ai_loop_job, interval=3600)
+    app.job_queue.run_repeating(wf0_tick, interval=60, first=0)
 
     # ✅ Daily Agenda (early morning)
     send_daily_agenda(app)
@@ -85,20 +166,18 @@ def main():
     send_time_reminders(app)
 
     # 🧠 Weekly Audit (Sunday 21:00)
-    from agent_brain.weekly_audit import send_weekly_audit
-    app.job_queue.run_daily(
-        callback=lambda ctx: asyncio.create_task(send_weekly_audit()),
-        time=dt.time(hour=21, minute=0, tzinfo=TZ),
-        days=(6,)  # Sunday
-    )
+    app.job_queue.run_daily(weekly_audit_job, time=dt.time(hour=21, minute=0, tzinfo=TZ), days=(6,))
 
     # 🌙 Evening Review (Every day at 21:30)
-    from agent_brain.evening_review import run_evening_review
-    app.job_queue.run_daily(
-        callback=lambda ctx: asyncio.create_task(run_evening_review()),
-        time=dt.time(hour=21, minute=30, tzinfo=TZ)
+    app.job_queue.run_daily(evening_review_job, time=dt.time(hour=21, minute=30, tzinfo=TZ))
+    app.add_handler(CallbackQueryHandler(handle_wf0_callback, pattern=r"^wf0:"))
+    app.add_handler(
+    MessageHandler(
+        filters.Regex(re.compile(r"^(i'?m doing )", re.IGNORECASE)) & ~filters.COMMAND,
+        handle_pivot_text
     )
-
+)
+    
     app.run_polling()
     
 if __name__ == "__main__":
