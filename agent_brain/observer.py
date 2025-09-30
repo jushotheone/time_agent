@@ -5,7 +5,7 @@ import os
 import datetime as dt
 import zoneinfo
 import calendar_client as cal
-import db
+import beia_core.models.timebox as db
 from agent_brain.quadrant_detector import detect_quadrant  # ✅ New
 
 import feature_flags as ff

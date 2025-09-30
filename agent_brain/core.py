@@ -5,7 +5,7 @@ import os
 from telegram import Bot
 from openai import AsyncOpenAI  # ✅ Use the async client
 import calendar_client
-from db import get_user_context, get_recent_conversation, save_conversation_turn, clear_conversation_history
+from beia_core.models.timebox import get_user_context, get_recent_conversation, save_conversation_turn, clear_conversation_history
 from agent_brain.observer import detect_drift
 from agent_brain.scheduler import propose_adjustment
 from agent_brain.prompts import generate_followup_nudge

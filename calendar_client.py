@@ -7,6 +7,9 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+from beia_core.models.timebox import insert_segment
+from beia_core.models import timebox as db
+
 import json
 
 from dateutil.parser import isoparse
@@ -164,31 +167,34 @@ def create_event(
     recurrence: Optional[str] = None,
     *,
     rigidity: str = "soft",          # 'hard' | 'firm' | 'soft' | 'free' (default: soft)
-    polish_title: bool = False       # future‑proof: LLM hook if you want it later
+    polish_title: bool = False,      # future-proof: LLM hook if you want it later
+    domain: Optional[str] = None,
+    subdomain_slug: Optional[str] = None,
+    build_id: Optional[str] = None,
+    sprint_id: Optional[str] = None,
 ) -> Dict:
     service = _service()
     end = start + dt.timedelta(minutes=duration_minutes)
 
     def _is_conflicting(_start: dt.datetime, _end: dt.datetime) -> bool:
         overlapping = service.events().list(
-            calendarId='primary',
+            calendarId="primary",
             timeMin=_start.isoformat(),
             timeMax=_end.isoformat(),
             singleEvents=True,
-            orderBy='startTime'
-        ).execute().get('items', [])
+            orderBy="startTime",
+        ).execute().get("items", [])
         return len(overlapping) > 0
 
-    # Optional title polish hook (no-op by default so it stays fast & deterministic)
+    # Optional title polish hook
     def maybe_polish_title(t: str) -> str:
-        return t  # plug in an LLM call later if you want
+        return t
 
     if polish_title:
         title = maybe_polish_title(title)
 
-    # Conflict handling with a suggested alternative
+    # Conflict handling
     if _is_conflicting(start, end):
-        # search forward for the next available window today (5-min steps, cap ~2h)
         probe = start
         cap = start + dt.timedelta(hours=2)
         while probe < cap:
@@ -196,27 +202,55 @@ def create_event(
             probe_end = probe + dt.timedelta(minutes=duration_minutes)
             if not _is_conflicting(probe, probe_end):
                 suggestion = f"{probe.astimezone(TZ).strftime('%H:%M')}–{probe_end.astimezone(TZ).strftime('%H:%M')}"
-                raise ValueError(f"⛔ Conflict: another event overlaps. Next open window: {suggestion}. Want me to move it there?")
+                raise ValueError(
+                    f"⛔ Conflict: another event overlaps. Next open window: {suggestion}. Want me to move it there?"
+                )
         raise ValueError("⛔ Conflict: another event overlaps this time window.")
 
+    # --- Build the Google Calendar body ---
     event_body = {
-        'summary': title,
-        'start': {'dateTime': start.isoformat(), 'timeZone': str(TZ)},
-        'end':   {'dateTime': end.isoformat(),   'timeZone': str(TZ)},
-        'reminders': {
-            'useDefault': False,
-            'overrides': [{'method': 'popup', 'minutes': 15}]
+        "summary": title,
+        "start": {"dateTime": start.isoformat(), "timeZone": str(TZ)},
+        "end": {"dateTime": end.isoformat(), "timeZone": str(TZ)},
+        "reminders": {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": 15}],
         },
-        # Tag rigidity so later moves respect hard/firm/soft/free
-        'extendedProperties': {'private': {'rigidity': rigidity}}
+        "extendedProperties": {
+            "private": {
+                "rigidity": rigidity,
+                "domain": domain or "",
+                "subdomain_slug": subdomain_slug or "",
+                "build_id": build_id or "",
+                "sprint_id": sprint_id or "",
+            }
+        },
     }
     if attendees:
-        event_body['attendees'] = [{'email': email} for email in attendees]
+        event_body["attendees"] = [{"email": email} for email in attendees]
     if recurrence:
-        event_body['recurrence'] = [recurrence]
+        event_body["recurrence"] = [recurrence]
 
-    event = service.events().insert(calendarId='primary', body=event_body).execute()
+    # --- Create in Google Calendar ---
+    event = service.events().insert(calendarId="primary", body=event_body).execute()
     log_event_action("create", event)
+
+    db.insert_segment(
+        {
+            "id": f"gcal:{event['id']}",   # keep a stable foreign key
+            "title": title,
+            "type": "scheduled",
+            "rigidity": rigidity,
+            "start_at": start,
+            "end_at": end,
+            "domain": domain,
+            "subdomain_slug": subdomain_slug,
+            "build_id": build_id,
+            "sprint_id": sprint_id,
+            "tz": str(TZ),
+        }
+    )
+
     return event
 
 def list_today() -> List[Dict]:
@@ -679,3 +713,51 @@ def get_time_until_next_event() -> Dict[str, Optional[Union[int, str]]]:
             return {"minutes_until": minutes_until, "summary": ev["summary"]}
 
     return {"minutes_until": None, "summary": None}
+
+def link_event_to_domain(event_id: str, domain: str = None,
+                         subdomain_slug: str = None,
+                         build_id: str = None,
+                         sprint_id: str = None):
+    """
+    Update Google Calendar + Postgres with the chosen classification fields.
+    """
+    service = _service()
+
+    # --- Update Google Calendar event ---
+    event = service.events().get(calendarId="primary", eventId=event_id).execute()
+    if "extendedProperties" not in event:
+        event["extendedProperties"] = {}
+    if "private" not in event["extendedProperties"]:
+        event["extendedProperties"]["private"] = {}
+
+    if domain:
+        event["extendedProperties"]["private"]["domain"] = domain
+    if subdomain_slug:
+        event["extendedProperties"]["private"]["subdomain_slug"] = subdomain_slug
+    if build_id:
+        event["extendedProperties"]["private"]["build_id"] = build_id
+    if sprint_id:
+        event["extendedProperties"]["private"]["sprint_id"] = sprint_id
+
+    updated = service.events().update(
+        calendarId="primary",
+        eventId=event_id,
+        body=event
+    ).execute()
+
+    # --- Normalize for Postgres ---
+    seg_id = f"gcal:{event_id}"   # ✅ consistent with create_event
+    fields = {}
+    if domain:
+        fields["domain"] = domain
+    if subdomain_slug:
+        fields["subdomain_slug"] = subdomain_slug
+    if build_id:
+        fields["build_id"] = build_id
+    if sprint_id:
+        fields["sprint_id"] = sprint_id
+
+    if fields:
+        db.update_segment(seg_id, **fields)
+
+    return updated

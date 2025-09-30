@@ -34,3 +34,4 @@ build/
 tests/personal_calendar_assistant_agent.code-workspace
 tree.txt
 .undo_event.json
+old_db.py

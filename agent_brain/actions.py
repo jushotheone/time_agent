@@ -1,4 +1,5 @@
 # agent_brain/actions.py
+
 import os
 import datetime as dt
 import calendar_client as cal
@@ -9,21 +10,77 @@ from agent_brain.respond import respond_with_brain
 # NEW imports (keep existing ones)
 from agent_brain import prompts
 from agent_brain import scheduler as sched   # centralize calendar reflows here
-import db                                    # segment/day_state writes
+import beia_core.models.timebox as db                                    # segment/day_state writes
 from feature_flags import ff
 from agent_brain.fsm import Tone
 import logging
+from bot import build_domain_keyboard   # add this at the top if not already imported
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 
 # -- Core event actions --
-def create_event(parsed):
+# -- Core event actions --
+async def create_event(parsed, update=None, context=None):
+    """
+    Create a calendar event, then immediately handle domain intake.
+    If domain is missing, prompt user in Telegram to classify it.
+    """
     title = parsed['title']
     date = parsed['date']
     time = parsed['time']
     duration = parsed.get('duration_minutes', 60)
     start = dt.datetime.fromisoformat(f"{date}T{time}").replace(tzinfo=TZ)
-    cal.create_event(title, start, duration)
+
+    # 1. Create the calendar event
+    event = cal.create_event(
+        title,
+        start,
+        duration,
+        parsed.get('attendees'),
+        parsed.get('recurrence')
+    )
+
+    # 2. Try to guess domain from title keywords
+    from beia_core.models.enums import Domain
+    title_lower = title.lower()
+    domain = None
+    for d in Domain:
+        if d.name in title_lower or d.value.lower() in title_lower:
+            domain = d
+            break
+
+    # 3. If not guessed, prompt user in Telegram
+    if not domain and update and context:
+        domain_options = ", ".join([d.name for d in Domain])
+        await respond_with_brain(
+            update,
+            context,
+            {"action": "classify_event_domain", "title": title},
+            summary=(
+                f"🗂 New event created: *{title}* on {date} at {time}.\n\n"
+                f"Which domain does this belong to?\nOptions: {domain_options}"
+            )
+        )
+
+    # 4. Persist in DB (timebox / segment entry)
+    try:
+        db.insert_event_with_domain(
+            event_id=event.get("id"),
+            title=title,
+            start_at=start,
+            duration=duration,
+            domain=domain.name if domain else None,
+        )
+    except Exception:
+        logging.exception("[Actions] Failed to persist event with domain info")
+
+    # 5. Send normal event confirmation
+    summary = format_event_description(event)
+    logging.info(f"[Actions] Sending Telegram message: {summary}")
+    if update and context:
+        await respond_with_brain(update, context, parsed, summary=summary)
+
+    return event
 
 def reschedule_event(parsed):
     new_start = dt.datetime.fromisoformat(f"{parsed['new_date']}T{parsed['new_time']}").replace(tzinfo=TZ)
@@ -130,6 +187,7 @@ async def handle_action(parsed, update, context):
     logging.info(f"[Actions] Received action: {action}")
     
 
+
     if action == "create_event":
         start = dt.datetime.fromisoformat(f"{parsed['date']}T{parsed['time']}").replace(tzinfo=TZ)
         event = cal.create_event(
@@ -139,9 +197,22 @@ async def handle_action(parsed, update, context):
             parsed.get('attendees'),
             parsed.get('recurrence')
         )
+
+        # 1. Send the normal event description
         summary = format_event_description(event)
         logging.info(f"[Actions] Sending Telegram message: {summary}")
         await respond_with_brain(update, context, parsed, summary=summary)
+
+        # 2. Prompt user to classify domain
+        try:
+            kb = build_domain_keyboard(event["id"])
+            await update.message.reply_text(
+                "🗂 Please pick a domain for this event:",
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.exception("[Actions] Failed to send domain keyboard: %s", e)
 
     elif action == "reschedule_event":
         new_start = dt.datetime.fromisoformat(f"{parsed['new_date']}T{parsed['new_time']}").replace(tzinfo=TZ)

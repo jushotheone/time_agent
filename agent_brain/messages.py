@@ -1,8 +1,21 @@
 # agent_brain/messages.py
 import random
 from typing import Tuple, Optional, Dict
+from beia_core.models.enums import Domain
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from feature_flags import ff_is_enabled
+
+def build_domain_picker(event_id: str):
+    """
+    Build inline keyboard with all Domain enum values.
+    event_id is needed so the callback can carry context.
+    """
+    buttons = []
+    for d in Domain:
+        buttons.append(
+            [InlineKeyboardButton(f"{d.name.title()}", callback_data=f"domain|{event_id}|{d.name}")]
+        )
+    return InlineKeyboardMarkup(buttons)
 
 def event_created(title=None):
     return f"✅ I’ve added *{title}* to your schedule." if title else "✅ Event created."

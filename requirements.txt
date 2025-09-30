@@ -5,6 +5,7 @@ annotated-types==0.7.0
 anyio==4.9.0
 APScheduler==3.10.4
 attrs==25.3.0
+beia_core @ git+https://${GITHUB_TOKEN}@github.com/jushotheone/beia_core.git@v0.3.6
 cachetools==5.5.2
 certifi==2025.7.9
 charset-normalizer==3.4.2

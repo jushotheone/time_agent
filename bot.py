@@ -1,10 +1,15 @@
 import os, logging, datetime as dt, zoneinfo
 from dotenv import load_dotenv
-import db
+import beia_core.models.timebox as db
+from beia_core.models.enums import Domain
+from beia_core.models.core import Sprint, Build, Subdomain
+
 import re
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
 
 import gpt_agent
 from agent_brain.scheduler import (
@@ -97,6 +102,74 @@ async def handle_wf0_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Reuse your normal action router so replies go through the LLM
     await AB.handle_action(parsed, update, context)
 
+async def handle_domain_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles domain selection callbacks.
+    Callback format: domain|<event_id>|<domain>[|<subdomain>[|<build_id>[|<sprint_id>]]]
+    """
+    q = update.callback_query
+    await q.answer()
+
+    try:
+        parts = q.data.split("|")
+        _, event_id, domain = parts[:3]
+        subdomain_slug = parts[3] if len(parts) > 3 else None
+        build_id      = parts[4] if len(parts) > 4 else None
+        sprint_id     = parts[5] if len(parts) > 5 else None
+    except ValueError:
+        await q.edit_message_text("⚠️ Invalid domain choice format.")
+        return
+
+    try:
+        # Update both GCal + Postgres
+        cal.link_event_to_domain(
+            event_id,
+            domain,
+            subdomain_slug=subdomain_slug,
+            build_id=build_id,
+            sprint_id=sprint_id,
+        )
+
+        # Build human-friendly response
+        parts_human = [domain.title()]
+        if subdomain_slug:
+            parts_human.append(subdomain_slug.title())
+        if build_id:
+            parts_human.append(f"Build {build_id}")
+        if sprint_id:
+            parts_human.append(f"Sprint {sprint_id}")
+
+        await q.edit_message_text(f"✅ Linked event to: *{' / '.join(parts_human)}*")
+
+    except Exception as e:
+        await q.edit_message_text(f"⚠️ Failed to link domain: {e}")
+
+def build_domain_keyboard(event_id: str, subdomains=None):
+    """
+    Build inline keyboard from backend Domain enum.
+    Supports optional subdomains for each domain.
+    Callback format: domain|<event_id>|<domain>[|<subdomain>[|<build_id>[|<sprint_id>]]]
+    """
+    buttons = []
+    for d in Domain:
+        # If subdomains for this domain exist, add buttons for each
+        if subdomains and d.name in subdomains:
+            for sub in subdomains[d.name]:
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{d.value.title()} / {sub.title()}",
+                        callback_data=f"domain|{event_id}|{d.name}|{sub}"
+                    )
+                ])
+        else:
+            # Fallback: domain only
+            buttons.append([
+                InlineKeyboardButton(
+                    d.value.title(),
+                    callback_data=f"domain|{event_id}|{d.name}"
+                )
+            ])
+    return InlineKeyboardMarkup(buttons)
 
 async def handle_pivot_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -156,6 +229,7 @@ def main():
     app.add_handler(CommandHandler("today", today))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_remind_again, pattern=r"^remind_again\|"))
+    app.add_handler(CallbackQueryHandler(handle_domain_callback, pattern=r"^domain\|"))
     app.job_queue.run_repeating(ai_loop_job, interval=3600)
     app.job_queue.run_repeating(wf0_tick, interval=60, first=0)
 

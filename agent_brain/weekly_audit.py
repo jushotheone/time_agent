@@ -5,7 +5,7 @@ from telegram import Bot
 import os
 import datetime as dt
 from zoneinfo import ZoneInfo
-import db
+import beia_core.models.timebox as db
 from collections import defaultdict
 import asyncio
 

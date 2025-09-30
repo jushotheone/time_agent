@@ -2,7 +2,7 @@
 import os, asyncio, inspect, datetime as dt
 from telegram import Bot
 
-from db import get_events_for_review, mark_ai_reviewed, get_user_context
+from beia_core.models.timebox import get_events_for_review, mark_ai_reviewed, get_user_context
 from gpt_agent import generate_nudge
 
 from agent_brain.core import run_brain
@@ -52,7 +52,7 @@ async def run_ai_loop():
             await asyncio.to_thread(mark_ai_reviewed, event["event_id"])
 
 async def followup_missed_q2(now, bot):
-    from db import get_conn
+    from beia_core.models.timebox import get_conn
     import datetime as dt
 
     def _fetch():

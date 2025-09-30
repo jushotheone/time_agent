@@ -17,7 +17,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
-import db
+import beia_core.models.timebox as db
 import calendar_client as cal
 from gpt_agent import create_reminder_message
 

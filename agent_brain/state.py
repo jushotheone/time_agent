@@ -1,7 +1,7 @@
 # ======================
 # agent_brain/state.py
 # ======================
-import db
+import beia_core.models.timebox as db
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 import os
