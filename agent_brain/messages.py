@@ -1,6 +1,6 @@
 # agent_brain/messages.py
 import random
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 from beia_core.models.enums import Domain
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from feature_flags import ff_is_enabled
@@ -292,3 +292,46 @@ def parse_wf0_callback(data: str) -> Dict:
         return {"kind": "action", "code": "RESET_DAY"}
 
     return {"kind": "error", "reason": "unknown_code", "seg_id": seg_id}
+
+
+# ---------- MISSED TASK NUDGE ----------
+def build_missed_task_nudge_text(
+    *,
+    name: str,
+    planned_hhmm: str,
+    date_iso: str,
+    options: List[str],
+    tone: str = "gentle",
+) -> str:
+    """
+    Deterministic missed-task nudge with machine-readable footer.
+    Must avoid guilt/parent tone (tests ban: should/must/need to/have to).
+    """
+    human = f"Looks like {name} didn't happen. Want to reschedule or skip?"
+    opts = ",".join([o.upper() for o in options])
+    footer = f"#ACTION type=missed_task name={name} date={date_iso} options=[{opts}]"
+    return f"{human}\n{footer}"
+
+
+# ---------- LOW-COGNITIVE + CHANGED-MIND ----------
+def build_changed_mind_reply(tone: str = "gentle") -> str:
+        """
+        User says: 'I changed my mind'
+        Contract:
+            - yield authority immediately
+            - max ONE question
+            - no optimisation
+            - no guilt / parental tone
+        """
+        return "Got it. Do you want today to be lighter, or just different?"
+
+
+def build_low_cognitive_load_default(context: Optional[Dict] = None) -> str:
+        """
+        User says: 'I don't want to think'
+        Contract:
+            - offer ONE default path
+            - no choices
+            - no questions
+        """
+        return "Alright. I’ll hold everything else and just remind you about rest and dinner."

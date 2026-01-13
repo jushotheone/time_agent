@@ -40,6 +40,12 @@ def test_main_sets_up_bot(
     mock_getenv.assert_called_with("TELEGRAM_BOT_TOKEN")
     mock_send_daily_agenda.assert_called_once_with(mock_app)
     mock_send_time_reminders.assert_called_once_with(mock_app)
-    mock_job_queue.run_repeating.assert_called_once()
+    # Bot schedules two repeating jobs: the AI loop + workflow #0 tick.
+    assert mock_job_queue.run_repeating.call_count == 2
+
+    calls = mock_job_queue.run_repeating.call_args_list
+    intervals = [kwargs.get("interval") for _, kwargs in calls]
+    assert 3600 in intervals  # ai_loop_job
+    assert 60 in intervals    # wf0_tick
     assert mock_job_queue.run_daily.call_count == 2
     mock_app.run_polling.assert_called_once()

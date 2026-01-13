@@ -1,10 +1,11 @@
 import os
 import json
+import re
 from typing import Dict, Any, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
 import zoneinfo
-from datetime import datetime
+from datetime import datetime, date
 from agent_brain.principles import COVEY_SYSTEM_PROMPT
 from feature_flags import ff
 
@@ -336,6 +337,54 @@ def generate_nudge(event, context):
 
     reply = res.choices[0].message["content"]
     return reply.strip() if "❌" not in reply else None
+
+
+# ----------------------------
+# Deterministic Chat Protocol (Contract)
+# ----------------------------
+_CMD_TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d\b")
+
+def parse_command(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Deterministic command parser for the Time Agent contract.
+    Does NOT use OpenAI. This is for chat protocol commands only.
+    """
+    raw = (text or "").strip()
+    upper = raw.upper()
+
+    # DONE <task...>
+    if upper.startswith("DONE "):
+        return {"action": "done", "task": raw[5:].strip()}
+
+    # SKIP <task...> [today]
+    if upper.startswith("SKIP "):
+        task = raw[5:].strip()
+        return {"action": "skip", "task": task}
+
+    # RESCHEDULE <task...> <HH:MM>
+    if upper.startswith("RESCHEDULE "):
+        rest = raw[len("RESCHEDULE "):].strip()
+        m = _CMD_TIME_RE.search(rest)
+        if not m:
+            return {"action": "reschedule", "task": rest, "time": None}
+        hhmm = m.group(0)
+        task = (rest[:m.start()] + rest[m.end():]).strip()
+        return {"action": "reschedule", "task": task, "time": hhmm}
+
+    # SUMMARY today | SUMMARY YYYY-MM-DD
+    if upper.startswith("SUMMARY"):
+        rest = raw[len("SUMMARY"):].strip()
+        if rest.lower() == "today" or rest == "":
+            return {"action": "summary", "date": date.today().isoformat()}
+        # basic ISO date pass-through
+        return {"action": "summary", "date": rest}
+
+    # WHAT DID I MISS today
+    if upper.startswith("WHAT DID I MISS"):
+        return {"action": "misses"}
+
+    return None
+
 
 # --- add near the bottom of gpt_agent.py ---
 def llm_tone_polish(text: str, tone: str, context: dict | None = None) -> str:

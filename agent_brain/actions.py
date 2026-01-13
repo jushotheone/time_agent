@@ -14,7 +14,6 @@ import beia_core.models.timebox as db                                    # segme
 from feature_flags import ff
 from agent_brain.fsm import Tone
 import logging
-from bot import build_domain_keyboard   # add this at the top if not already imported
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 
@@ -205,7 +204,7 @@ async def handle_action(parsed, update, context):
 
         # 2. Prompt user to classify domain
         try:
-            kb = build_domain_keyboard(event["id"])
+            kb = msg.build_domain_picker(event["id"])
             await update.message.reply_text(
                 "🗂 Please pick a domain for this event:",
                 reply_markup=kb,
