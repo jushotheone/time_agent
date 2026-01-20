@@ -339,51 +339,6 @@ def generate_nudge(event, context):
     return reply.strip() if "❌" not in reply else None
 
 
-# ----------------------------
-# Deterministic Chat Protocol (Contract)
-# ----------------------------
-_CMD_TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d\b")
-
-def parse_command(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Deterministic command parser for the Time Agent contract.
-    Does NOT use OpenAI. This is for chat protocol commands only.
-    """
-    raw = (text or "").strip()
-    upper = raw.upper()
-
-    # DONE <task...>
-    if upper.startswith("DONE "):
-        return {"action": "done", "task": raw[5:].strip()}
-
-    # SKIP <task...> [today]
-    if upper.startswith("SKIP "):
-        task = raw[5:].strip()
-        return {"action": "skip", "task": task}
-
-    # RESCHEDULE <task...> <HH:MM>
-    if upper.startswith("RESCHEDULE "):
-        rest = raw[len("RESCHEDULE "):].strip()
-        m = _CMD_TIME_RE.search(rest)
-        if not m:
-            return {"action": "reschedule", "task": rest, "time": None}
-        hhmm = m.group(0)
-        task = (rest[:m.start()] + rest[m.end():]).strip()
-        return {"action": "reschedule", "task": task, "time": hhmm}
-
-    # SUMMARY today | SUMMARY YYYY-MM-DD
-    if upper.startswith("SUMMARY"):
-        rest = raw[len("SUMMARY"):].strip()
-        if rest.lower() == "today" or rest == "":
-            return {"action": "summary", "date": date.today().isoformat()}
-        # basic ISO date pass-through
-        return {"action": "summary", "date": rest}
-
-    # WHAT DID I MISS today
-    if upper.startswith("WHAT DID I MISS"):
-        return {"action": "misses"}
-
-    return None
 
 
 # --- add near the bottom of gpt_agent.py ---
@@ -417,3 +372,105 @@ def llm_tone_polish(text: str, tone: str, context: dict | None = None) -> str:
     except Exception as e:
         print("LLM tone polish error:", e)
         return text
+    
+# ----------------------------
+# Deterministic Chat Protocol (Contract)
+# ----------------------------
+_CMD_TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d\b")
+_CMD_INT_RE  = re.compile(r"\b(\d{1,3})\b")
+
+
+def parse_command(text: str) -> Optional[Dict[str, Any]]:
+    """Deterministic command parser for contract-style chat commands.
+
+    This MUST NOT use OpenAI. It returns a stable dict schema so the router can
+    execute without Telegram UI.
+
+    Supported commands:
+      - DONE <title>
+      - DIDNT START <title>
+      - NEED MORE <title> <minutes>
+      - RESCHEDULE <title> <HH:MM>
+      - MOVE NEXT <title>
+      - SKIP <title>
+      - SUMMARY today | SUMMARY YYYY-MM-DD
+      - WHAT DID I MISS today | WHAT DID I MISS YYYY-MM-DD
+      - PAUSE
+      - SNOOZE 5 | SNOOZE 15
+      - I'M DOING <x> / IM DOING <x>
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    upper = raw.upper()
+
+    # DONE <title...>
+    if upper.startswith("DONE "):
+        return {"action": "done", "title": raw[5:].strip()}
+
+    # DIDNT START <title...>
+    if upper.startswith("DIDNT START "):
+        return {"action": "didnt_start", "title": raw[len("DIDNT START "):].strip()}
+
+    # NEED MORE <title...> <minutes>
+    if upper.startswith("NEED MORE "):
+        rest = raw[len("NEED MORE "):].strip()
+        m = re.search(r"(\d+)\s*$", rest)
+        if not m:
+            return {"action": "need_more", "title": rest, "minutes": None}
+        minutes = int(m.group(1))
+        title = rest[: m.start(1)].strip()
+        return {"action": "need_more", "title": title, "minutes": minutes}
+
+    # RESCHEDULE <title...> <HH:MM>
+    if upper.startswith("RESCHEDULE "):
+        rest = raw[len("RESCHEDULE "):].strip()
+        m = _CMD_TIME_RE.search(rest)
+        if not m:
+            return {"action": "reschedule", "title": rest, "new_time": None}
+        hhmm = m.group(0)
+        title = (rest[:m.start()] + rest[m.end():]).strip()
+        return {"action": "reschedule", "title": title, "new_time": hhmm}
+
+    # MOVE NEXT <title...>
+    if upper.startswith("MOVE NEXT "):
+        return {"action": "move_next", "title": raw[len("MOVE NEXT "):].strip()}
+
+    # SKIP <title...>
+    if upper.startswith("SKIP "):
+        return {"action": "skip", "title": raw[len("SKIP "):].strip()}
+
+    # SUMMARY today | SUMMARY YYYY-MM-DD
+    if upper.startswith("SUMMARY"):
+        rest = raw[len("SUMMARY"):].strip()
+        if rest.lower() == "today" or rest == "":
+            return {"action": "summary", "date": "today"}
+        return {"action": "summary", "date": rest}
+
+    # WHAT DID I MISS today | WHAT DID I MISS YYYY-MM-DD
+    if upper.startswith("WHAT DID I MISS"):
+        rest = raw[len("WHAT DID I MISS"):].strip()
+        if rest.lower() == "today" or rest == "":
+            return {"action": "misses", "date": "today"}
+        return {"action": "misses", "date": rest}
+
+    # PAUSE
+    if upper == "PAUSE":
+        return {"action": "pause"}
+
+    # SNOOZE 5 / SNOOZE 15
+    if upper.startswith("SNOOZE"):
+        rest = raw[len("SNOOZE"):].strip()
+        try:
+            minutes = int(rest)
+        except Exception:
+            minutes = None
+        return {"action": "snooze", "minutes": minutes}
+
+    # I'M DOING <x>  (accept both I'M and IM)
+    if upper.startswith("I'M DOING ") or upper.startswith("IM DOING "):
+        prefix_len = len("I'M DOING ") if upper.startswith("I'M DOING ") else len("IM DOING ")
+        return {"action": "drift", "title": raw[prefix_len:].strip()}
+
+    return None
