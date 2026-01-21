@@ -184,6 +184,108 @@ async def _send_llm_payload(update, context, action_name: str, payload: dict):
 async def handle_action(parsed, update, context):
     action = parsed.get("action")
     logging.info(f"[Actions] Received action: {action}")
+
+    # ------------------------------------------------------------
+    # Contract adapter (CP-1 / CC-3)
+    # Map deterministic chat-protocol actions (from gpt_agent.parse_command)
+    # into the existing WF0/FSM verbs already implemented below.
+    # ------------------------------------------------------------
+
+    # Best-effort: resolve a segment_id for contract-style commands.
+    def _resolve_active_segment_id() -> str | None:
+        try:
+            now = dt.datetime.now(tz=TZ)
+            seg = db.get_active_segment(now)
+            return seg.get("id") if seg else None
+        except Exception:
+            logging.exception("[Actions] Failed to resolve active segment")
+            return None
+
+    # Adapter for contract actions
+    if action in {
+        "done",
+        "didnt_start",
+        "need_more",
+        "snooze",
+        "drift",
+        "pause",
+        "summary",
+        "misses",
+        "reschedule",
+        "move_next",
+        "skip",
+    }:
+        seg_id = parsed.get("segment_id") or _resolve_active_segment_id()
+
+        # DONE -> mark_done (closes current segment)
+        if action == "done":
+            if seg_id:
+                parsed = {"action": "mark_done", "segment_id": seg_id}
+            else:
+                parsed = {"action": "chat_fallback", "user_prompt": "No active block to mark as done."}
+
+        # DIDNT START -> mark_missed
+        elif action == "didnt_start":
+            if seg_id:
+                parsed = {"action": "mark_missed", "segment_id": seg_id}
+            else:
+                parsed = {"action": "chat_fallback", "user_prompt": "No active block to mark as missed."}
+
+        # NEED MORE <minutes> -> extend_15 / extend_30 (nearest supported)
+        elif action == "need_more":
+            minutes = parsed.get("minutes")
+            try:
+                minutes = int(minutes) if minutes is not None else 15
+            except Exception:
+                minutes = 15
+
+            if not seg_id:
+                parsed = {"action": "chat_fallback", "user_prompt": "No active block to extend."}
+            else:
+                # Map to existing extension verbs
+                if minutes <= 15:
+                    parsed = {"action": "extend_15", "segment_id": seg_id}
+                else:
+                    parsed = {"action": "extend_30", "segment_id": seg_id}
+
+        # SNOOZE <minutes> -> snooze_segment
+        elif action == "snooze":
+            minutes = parsed.get("minutes")
+            try:
+                minutes = int(minutes) if minutes is not None else 5
+            except Exception:
+                minutes = 5
+
+            if seg_id:
+                parsed = {"action": "snooze_segment", "segment_id": seg_id, "minutes": minutes}
+            else:
+                parsed = {"action": "chat_fallback", "user_prompt": "No active block to snooze."}
+
+        # I'M DOING <x> -> pivot
+        elif action == "drift":
+            new_focus = parsed.get("title") or parsed.get("new_focus")
+            if seg_id and new_focus:
+                parsed = {"action": "pivot", "segment_id": seg_id, "new_focus": new_focus}
+            elif not seg_id:
+                parsed = {"action": "chat_fallback", "user_prompt": "No active block to pivot from."}
+            else:
+                parsed = {"action": "chat_fallback", "user_prompt": "Tell me what you're doing (e.g. I'M DOING band practice)."}
+
+        # PAUSE (not implemented in WF0 yet) -> chat_fallback
+        elif action == "pause":
+            parsed = {"action": "chat_fallback", "user_prompt": "Pause isn't wired yet. Try SNOOZE 5 or DONE."}
+
+        # SUMMARY / MISSES / RESCHEDULE / MOVE NEXT / SKIP are part of the broader contract,
+        # but are not wired into this actions router yet. Route them through chat_fallback
+        # so the companion can respond without dead-ending.
+        elif action in {"summary", "misses", "reschedule", "move_next", "skip"}:
+            parsed = {
+                "action": "chat_fallback",
+                "user_prompt": f"Contract command '{action}' isn't wired yet in actions.py. Use agenda commands like 'Agenda for today' or WF0 buttons."  # noqa: E501
+            }
+
+        # Refresh action name after mapping
+        action = parsed.get("action")
     
 
 

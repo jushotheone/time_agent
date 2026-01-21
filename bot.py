@@ -33,13 +33,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 
 TZ = zoneinfo.ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    parsed = gpt_agent.parse(text)
+# bot.py (only the updated functions)
 
-    if not parsed:
-        await update.message.reply_text("Hmm, I couldn’t process that. Try rephrasing?")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if not text:
         return
+
+    # 1) ✅ Contract-first deterministic parser (CP-1 / CC-3)
+    parsed = gpt_agent.parse_command(text)
+
+    # 2) ✅ If not a contract command, use LLM tool-call parser (calendar ops)
+    if not parsed:
+        parsed = gpt_agent.parse(text)
+
+    # 3) ✅ If still nothing, route to companion brain (no hardcoded assistant fluff)
+    if not parsed:
+        # Push raw user text into the companion brain via AB's existing fallback path
+        # so the tone + context rules apply.
+        parsed = {"action": "chat_fallback", "user_prompt": text}
 
     try:
         await AB.handle_action(parsed, update, context)
@@ -47,6 +59,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(str(ve))
     except Exception as e:
         await update.message.reply_text(f"⚠️ Something went wrong while processing: {e}")
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Time Master ready.\n\n"
+        "Try:\n"
+        "- SUMMARY today\n"
+        "- WHAT DID I MISS today\n"
+        "- WHAT’S NEXT\n"
+        "- DONE <title>\n"
+        "- DIDNT START <title>\n"
+        "- NEED MORE <title> <minutes>\n\n"
+        "Or just speak normally, e.g. “Add band practice today at 20:00”."
+    )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     events = cal.list_today()
@@ -61,7 +87,9 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
     
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hi! I'm your Calendar Assistant. What would you like to do today?")
+    await update.message.reply_text(
+        "👋 Time Master ready. Try: SUMMARY today, WHAT’S NEXT, or SCHEDULE <title> <minutes>."
+    )
     
 _CHAT_TZ = _ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 
